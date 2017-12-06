@@ -12,14 +12,15 @@ namespace Orleans.StorageProvider.Arango
     public static class ExtensionMethods
     {
         public static void RegisterArangoStorageProvider(
-            this GlobalConfiguration globalConfig, 
+            this GlobalConfiguration globalConfig,
             string name,
             string databaseName = "Orleans",
             string url = "http://localhost:8529",
             string username = "root",
             string password = "",
             bool waitForSync = true,
-            string collectionName = null)
+            string collectionName = null,
+            string contractResolver = null)
 
         {
             var properties = new Dictionary<string, string>();
@@ -30,6 +31,7 @@ namespace Orleans.StorageProvider.Arango
             properties.Add("Password", password);
             properties.Add("WaitForSync", waitForSync.ToString());
             properties.Add("CollectionName", collectionName);
+            properties.Add("ContractResolver", contractResolver);
 
             globalConfig.RegisterStorageProvider<ArangoStorageProvider>(name, properties);
 
