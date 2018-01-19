@@ -4,7 +4,7 @@ using System;
 namespace Orleans.StorageProvider.Arango
 {
     [Serializable]
-    class GrainState
+    public class GrainState
     {
         [DocumentProperty(Identifier = IdentifierType.Revision)]
         public string Revision { get; set; }
