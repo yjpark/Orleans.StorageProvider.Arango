@@ -15,10 +15,10 @@ namespace Orleans.StorageProvider.Arango
 
     internal class GrainReferenceConverter : JsonConverter
     {
-        public GrainReferenceConverter(SerializationManager serializationManager, IGrainFactory grainFactory)
+        public GrainReferenceConverter(ITypeResolver typeResolver, IGrainFactory grainFactory)
         {
 
-            serializerSettings = OrleansJsonSerializer.GetDefaultSerializerSettings(serializationManager, grainFactory);
+            serializerSettings = OrleansJsonSerializer.GetDefaultSerializerSettings(typeResolver, grainFactory);
         }
 
         JsonSerializerSettings serializerSettings;

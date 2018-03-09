@@ -2,70 +2,85 @@
 using System.Collections.Concurrent;
 using System.Linq;
 using System.Net;
+using System.Threading;
 using System.Threading.Tasks;
 using ArangoDB.Client;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
-using Orleans.Providers;
+using Orleans.Storage;
 using Orleans.Runtime;
 using Orleans.Serialization;
-using Orleans.Storage;
 
 namespace Orleans.StorageProvider.Arango
 {
-    public class ArangoStorageProvider : IStorageProvider
+    public class ArangoGrainStorage : IGrainStorage, ILifecycleParticipant<ISiloLifecycle>
     {
-        public ArangoDatabase Database { get; private set; }
-        public Logger Log { get; private set; }
-        public string Name { get; private set; }
+        private readonly string Name;
+        private readonly ArangoStorageOptions Options;
+        private readonly ILoggerFactory LoggerFactory;
+        private readonly ILogger Logger;
+        private readonly SerializationManager SerializationManager;
+        private readonly ITypeResolver TypeResolver;
+        private readonly IGrainFactory GrainFactory;
 
+        private Newtonsoft.Json.JsonSerializer JsonSerializerSettings;
+        public ArangoDatabase Database {
+            get; private set;
+         }
 
-        static Newtonsoft.Json.JsonSerializer jsonSerializerSettings;
-        string collectionName;
+        private ConcurrentBag<string> initialisedCollections = new ConcurrentBag<string>();
 
-        ConcurrentBag<string> initialisedCollections = new ConcurrentBag<string>();
-
-        public Task Close()
+        public ArangoGrainStorage(string name, ArangoStorageOptions options, ILoggerFactory loggerFactory,
+                            SerializationManager serializationManager, ITypeResolver typeResolver, IGrainFactory grainFactory)
         {
-            this.Database.Dispose();
+            Name = name;
+            Options = options;
+            LoggerFactory = loggerFactory;
+            Logger = loggerFactory.CreateLogger($"{this.GetType().FullName}.{name}");
+            SerializationManager = serializationManager;
+            TypeResolver = typeResolver;
+            GrainFactory = grainFactory;
+        }
+
+        public void Participate(ISiloLifecycle lifecycle)
+        {
+            lifecycle.Subscribe(Options.InitStage, Init, Close);
+        }
+
+        public Task Close(CancellationToken ct)
+        {
+            if (Database != null) {
+                Database.Dispose();
+                Database = null;
+            }
             return Task.CompletedTask;
         }
 
-        public Task Init(string name, IProviderRuntime providerRuntime, IProviderConfiguration config)
+        public Task Init(CancellationToken ct)
         {
-            this.Log = providerRuntime.GetLogger(nameof(ArangoStorageProvider));
-            this.Name = name;
-
-            var databaseName = config.GetProperty("DatabaseName", "Orleans");
-            var url = config.GetProperty("Url", "http://localhost:8529");
-            var username = config.GetProperty("Username", "root");
-            var password = config.GetProperty("Password", "");
-            var waitForSync = config.GetBoolProperty("WaitForSync", true);
-            collectionName = config.GetProperty("CollectionName", null);
-
-            var serializationManager = providerRuntime.ServiceProvider.GetRequiredService<SerializationManager>();
-            var grainRefConverter = new GrainReferenceConverter(serializationManager, providerRuntime.GrainFactory);
+            var grainRefConverter = new GrainReferenceConverter(TypeResolver, GrainFactory);
+            JsonSerializerSettings = new JsonSerializer();
+            JsonSerializerSettings.Converters.Add(grainRefConverter);
 
             ArangoDatabase.ChangeSetting(s =>
             {
-                s.Database = databaseName;
-                s.Url = url;
-                s.Credential = new NetworkCredential(username, password);
+                s.Database = Options.DatabaseName;
+                s.Url = Options.Url;
+                s.Credential = new NetworkCredential(Options.Username, Options.Password);
                 s.DisableChangeTracking = true;
-                s.WaitForSync = waitForSync;
+                s.WaitForSync = Options.WaitForSync;
                 s.Serialization.Converters.Add(grainRefConverter);
             });
-
-            jsonSerializerSettings = new JsonSerializer();
-            jsonSerializerSettings.Converters.Add(grainRefConverter);
 
             this.Database = new ArangoDatabase();
 
             return Task.CompletedTask;
         }
 
-        async Task<IDocumentCollection> InitialiseCollection(string name)
+        private async Task<IDocumentCollection> InitialiseCollection(string name)
         {
             if (!this.initialisedCollections.Contains(name))
             {
@@ -75,7 +90,7 @@ namespace Orleans.StorageProvider.Arango
                 }
                 catch (Exception)
                 {
-                    this.Log.Info($"Arango Storage Provider: Error creating {name} collection, it may already exist");
+                    Logger.Info($"Arango Storage Provider: Error creating {name} collection, it may already exist");
                 }
 
                 this.initialisedCollections.Add(name);
@@ -84,11 +99,11 @@ namespace Orleans.StorageProvider.Arango
             return this.Database.Collection(name);
         }
 
-        Task<IDocumentCollection> GetCollection(string grainType)
+        private Task<IDocumentCollection> GetCollection(string grainType)
         {
-            if (!string.IsNullOrWhiteSpace(this.collectionName))
+            if (!string.IsNullOrWhiteSpace(Options.CollectionName))
             {
-                return InitialiseCollection(this.collectionName);
+                return InitialiseCollection(Options.CollectionName);
             }
 
             return InitialiseCollection(grainType.Split('.').Last().ToArangoCollectionName());
@@ -100,13 +115,13 @@ namespace Orleans.StorageProvider.Arango
             {
                 var primaryKey = grainReference.ToArangoKeyString();
                 var collection = await GetCollection(grainType);
-                
+
                 var result = await collection.DocumentAsync<GrainState>(primaryKey).ConfigureAwait(false);
                 if (null == result) return;
 
                 if (result.State != null)
                 {
-                    grainState.State = (result.State as JObject).ToObject(grainState.State.GetType(), jsonSerializerSettings);
+                    grainState.State = (result.State as JObject).ToObject(grainState.State.GetType(), JsonSerializerSettings);
                 }
                 else
                 {
@@ -116,7 +131,7 @@ namespace Orleans.StorageProvider.Arango
             }
             catch (Exception ex)
             {
-                this.Log.Error(190000, "ArangoStorageProvider.ReadStateAsync()", ex);
+                Logger.Error(190000, "ArangoStorageProvider.ReadStateAsync()", ex);
                 throw new ArangoStorageException(ex.ToString());
             }
         }
@@ -148,7 +163,7 @@ namespace Orleans.StorageProvider.Arango
             }
             catch (Exception ex)
             {
-                this.Log.Error(190001, "ArangoStorageProvider.WriteStateAsync()", ex);
+                Logger.Error(190001, "ArangoStorageProvider.WriteStateAsync()", ex);
                 throw new ArangoStorageException(ex.ToString());
             }
         }
@@ -166,9 +181,18 @@ namespace Orleans.StorageProvider.Arango
             }
             catch (Exception ex)
             {
-                this.Log.Error(190002, "ArangoStorageProvider.ClearStateAsync()", ex);
+                Logger.Error(190002, "ArangoStorageProvider.ClearStateAsync()", ex);
                 throw new ArangoStorageException(ex.ToString());
             }
+        }
+    }
+
+    public static class ArangoGrainStorageFactory
+    {
+        public static IGrainStorage Create(IServiceProvider services, string name)
+        {
+            IOptionsSnapshot<ArangoStorageOptions> optionsSnapshot = services.GetRequiredService<IOptionsSnapshot<ArangoStorageOptions>>();
+            return ActivatorUtilities.CreateInstance<ArangoGrainStorage>(services, optionsSnapshot.Get(name), name);
         }
     }
 }
