@@ -47,7 +47,7 @@ namespace Orleans.StorageProvider.Arango
 
         public void Participate(ISiloLifecycle lifecycle)
         {
-            lifecycle.Subscribe(Options.InitStage, Init, Close);
+            lifecycle.Subscribe(OptionFormattingUtilities.Name<ArangoGrainStorage>(Name), Options.InitStage, Init, Close);
         }
 
         public Task Close(CancellationToken ct)
